@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Wooden Log Detection — Upload{% endblock %}
+
+{% block content %}
+<div class="hero">
+    <h1>🪵 Wooden Log Detection</h1>
+    <p class="subtitle">Upload an image or video to detect wooden logs using YOLOv8 + OpenCV</p>
+</div>
+
+<div class="upload-card">
+    <form id="detect-form" action="/detect" method="POST" enctype="multipart/form-data">
+        <div class="dropzone" id="dropzone">
+            <div class="dropzone-content">
+                <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p><strong>Click to browse</strong> or drag &amp; drop</p>
+                <p class="hint">Images: JPG, PNG, BMP, WEBP &middot; Video: MP4, AVI, MOV, MKV &middot; Max 50&nbsp;MB</p>
+            </div>
+            <input type="file" name="file" id="file-input" accept="image/*,video/*" hidden>
+        </div>
+
+        <div class="file-info" id="file-info" style="display:none;">
+            <span class="file-name" id="file-name"></span>
+            <button type="button" class="btn-clear" id="btn-clear">Remove</button>
+        </div>
+
+        <div class="form-row">
+            <label for="confidence">Confidence Threshold:</label>
+            <div class="slider-group">
+                <input type="range" name="confidence" id="confidence" min="0.05" max="0.95" step="0.05" value="0.25">
+                <span class="slider-value" id="confidence-value">0.25</span>
+            </div>
+        </div>
+
+        <div class="model-info">
+            <h3>Model Information</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="info-label">Model</span>
+                    <span class="info-value">YOLOv8</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Classes</span>
+                    <span class="info-value">
+                        {% for cls in classes %}{{ cls }}{% if not loop.last %}, {% endif %}{% endfor %}
+                    </span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Backend</span>
+                    <span class="info-value">Ultralytics + OpenCV</span>
+                </div>
+            </div>
+        </div>
+
+        <button type="submit" class="btn-primary" id="btn-detect">
+            <span class="btn-text">🔍 Detect Wooden Logs</span>
+        </button>
+    </form>
+</div>
+
+<div class="features">
+    <div class="feature">
+        <h3>🖼️ Image Detection</h3>
+        <p>Upload images and get bounding box annotations with confidence scores.</p>
+    </div>
+    <div class="feature">
+        <h3>🎬 Video Detection</h3>
+        <p>Process video files frame-by-frame with annotated output.</p>
+    </div>
+    <div class="feature">
+        <h3>📊 Statistics</h3>
+        <p>View detection count, confidence distribution, and processing time.</p>
+    </div>
+</div>
+{% endblock %}

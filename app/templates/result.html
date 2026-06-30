@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Detection Results — Wooden Log Detection{% endblock %}
+
+{% block content %}
+<div class="result-header">
+    <h1>🔍 Detection Results</h1>
+    <a href="/" class="btn-secondary">← Upload Another</a>
+</div>
+
+{% if stats.count == 0 and not is_video %}
+<div class="no-detections">
+    <h2>No wooden logs detected</h2>
+    <p>Try lowering the confidence threshold or uploading a different image.</p>
+</div>
+{% endif %}
+
+<div class="result-grid">
+    <!-- Original Image -->
+    <div class="result-card">
+        <h3>Original</h3>
+        {% if is_video %}
+        <video controls width="100%">
+            <source src="{{ url_for('static', filename=original_image) }}">
+            Your browser does not support video playback.
+        </video>
+        {% else %}
+        <img src="{{ url_for('static', filename=original_image) }}" alt="Original" class="result-img">
+        {% endif %}
+    </div>
+
+    <!-- Annotated Result -->
+    <div class="result-card">
+        <h3>Detection Result {% if is_video %}(Annotated Video){% endif %}</h3>
+        {% if is_video %}
+        <video controls width="100%">
+            <source src="{{ url_for('static', filename=result_image) }}">
+            Your browser does not support video playback.
+        </video>
+        {% else %}
+        <img src="{{ url_for('static', filename=result_image) }}" alt="Detection Result" class="result-img">
+        {% endif %}
+    </div>
+</div>
+
+<!-- Statistics -->
+<div class="stats-section">
+    <h2>📊 Statistics</h2>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <span class="stat-value">{{ stats.count }}</span>
+            <span class="stat-label">Objects Detected</span>
+        </div>
+        {% if not is_video %}
+        <div class="stat-card">
+            <span class="stat-value">{{ stats.avg_confidence }}</span>
+            <span class="stat-label">Avg Confidence</span>
+        </div>
+        <div class="stat-card">
+            <span class="stat-value">{{ stats.max_confidence }}</span>
+            <span class="stat-label">Max Confidence</span>
+        </div>
+        {% endif %}
+        <div class="stat-card">
+            <span class="stat-value">{{ "%.1f"|format(processing_time_ms) }} ms</span>
+            <span class="stat-label">{% if is_video %}Avg / Frame{% else %}Processing Time{% endif %}</span>
+        </div>
+        {% if is_video %}
+        <div class="stat-card">
+            <span class="stat-value">{{ video_summary.frames_processed }}</span>
+            <span class="stat-label">Frames Processed</span>
+        </div>
+        <div class="stat-card">
+            <span class="stat-value">{{ video_summary.fps }}</span>
+            <span class="stat-label">Video FPS</span>
+        </div>
+        {% else %}
+        <div class="stat-card">
+            <span class="stat-value">{{ image_width }}×{{ image_height }}</span>
+            <span class="stat-label">Image Size</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Detection Details (images only) -->
+{% if not is_video and detections %}
+<div class="detection-table-section">
+    <h2>📋 Detection Details</h2>
+    <div class="table-wrapper">
+        <table class="detection-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Class</th>
+                    <th>Confidence</th>
+                    <th>Bounding Box (x1, y1, x2, y2)</th>
+                    <th>Confidence Bar</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for det in detections %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td><span class="badge">{{ det.class_name }}</span></td>
+                    <td>{{ "%.4f"|format(det.confidence) }}</td>
+                    <td class="mono">
+                        ({{ det.bbox.x1 }}, {{ det.bbox.y1 }}, {{ det.bbox.x2 }}, {{ det.bbox.y2 }})
+                    </td>
+                    <td>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: {{ (det.confidence * 100)|round }}%"></div>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<!-- Class Distribution -->
+{% if stats.class_distribution %}
+<div class="distribution-section">
+    <h2>📈 Class Distribution</h2>
+    <div class="distribution-bars">
+        {% for cls, count in stats.class_distribution.items() %}
+        <div class="dist-item">
+            <span class="dist-label">{{ cls }}</span>
+            <div class="dist-bar-container">
+                <div class="dist-bar" style="width: {{ (count / stats.count * 100)|round }}%"></div>
+                <span class="dist-count">{{ count }}</span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML artifacts
+models/*.pt
+models/*.onnx
+models/*.engine
+runs/
+wandb/
+
+# Data (keep config, ignore generated images/labels)
+data/images/
+data/labels/
+!data/.gitkeep
+
+# Uploads & results (generated at runtime)
+app/static/uploads/*
+app/static/results/*
+!app/static/uploads/.gitkeep
+!app/static/results/.gitkeep
+
+# Env
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+
+# Tool artifacts (do not commit)
+.playwright-mcp/
+*.png
+yolov8n.pt
