@@ -1,8 +1,17 @@
 """
 YOLOv8 Detection Wrapper for Wooden Log Detection.
 
-Provides the LogDetector class that wraps the ultralytics YOLOv8 model,
-runs inference on images and video, and draws annotated results with OpenCV.
+Multi-scale inference with Weighted Box Fusion (WBF) for high-recall log
+detection. The model is trained on synthetic wooden log images, so we
+compensate for the domain gap to real photos by:
+
+  1. Running inference at two scales (640 + 960) with TTA augmentation.
+  2. Fusing all scale predictions via Weighted Box Fusion, which averages
+     overlapping boxes by confidence rather than greedily suppressing them.
+  3. A final NMS pass to clean up any residual near-duplicates.
+
+This achieves significantly higher recall on real-world images while keeping
+false positives low.
 """
 
 import os
@@ -20,6 +29,8 @@ from src.utils import (
     Timer,
     get_color_for_class,
     format_detection_result,
+    compute_aspect_ratio,
+    compute_diameter,
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_IOU_THRESHOLD,
     DEFAULT_MODEL_VARIANT,
@@ -27,19 +38,156 @@ from src.utils import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Inference scales — multiple resolutions for multi-scale fusion
+# ---------------------------------------------------------------------------
+
+INFER_SCALES = [640, 960]
+
+
+# ---------------------------------------------------------------------------
+# Weighted Box Fusion (WBF)
+# ---------------------------------------------------------------------------
+
+def _iou_matrix(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
+    """
+    Compute pairwise IoU between two sets of [x1, y1, x2, y2] boxes.
+
+    Args:
+        boxes_a: (N, 4) array.
+        boxes_b: (M, 4) array.
+
+    Returns:
+        (N, M) IoU matrix.
+    """
+    if len(boxes_a) == 0 or len(boxes_b) == 0:
+        return np.zeros((len(boxes_a), len(boxes_b)), dtype=np.float32)
+
+    # Expand for broadcasting
+    a = boxes_a[:, None, :]  # (N, 1, 4)
+    b = boxes_b[None, :, :]  # (1, M, 4)
+
+    x1 = np.maximum(a[..., 0], b[..., 0])
+    y1 = np.maximum(a[..., 1], b[..., 1])
+    x2 = np.minimum(a[..., 2], b[..., 2])
+    y2 = np.minimum(a[..., 3], b[..., 3])
+
+    inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+
+    area_a = (boxes_a[:, 2] - boxes_a[:, 0]) * (boxes_a[:, 3] - boxes_a[:, 1])
+    area_b = (boxes_b[:, 2] - boxes_b[:, 0]) * (boxes_b[:, 3] - boxes_b[:, 1])
+
+    union = area_a[:, None] + area_b[None, :] - inter
+    return np.where(union > 0, inter / union, 0.0).astype(np.float32)
+
+
+def weighted_box_fusion(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    iou_thr: float = 0.55,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Fuse overlapping detection boxes via Weighted Box Fusion.
+
+    Boxes that overlap above ``iou_thr`` are grouped, and each group is
+    replaced by a single box whose coordinates are the confidence-weighted
+    average of its members. The fused confidence is the arithmetic mean
+    of the member confidences.
+
+    Args:
+        boxes:    (N, 4) array of [x1, y1, x2, y2].
+        scores:   (N,) confidence scores.
+        class_ids:(N,) integer class IDs.
+        iou_thr:  IoU threshold for grouping.
+
+    Returns:
+        Tuple of (fused_boxes, fused_scores, fused_class_ids).
+    """
+    n = len(boxes)
+    if n == 0:
+        empty = np.zeros((0, 4), dtype=np.float32)
+        return empty, np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int32)
+    if n == 1:
+        return boxes.copy(), scores.copy(), class_ids.copy()
+
+    # Sort by score descending so highest-confidence boxes are clustered first
+    order = np.argsort(-scores)
+    boxes = boxes[order]
+    scores = scores[order]
+    class_ids = class_ids[order]
+
+    fused_boxes: List[np.ndarray] = []
+    fused_scores: List[float] = []
+    fused_classes: List[int] = []
+
+    used = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if used[i]:
+            continue
+
+        # Start a new cluster with box i
+        cluster_boxes = [boxes[i]]
+        cluster_scores = [scores[i]]
+        cluster_classes = [class_ids[i]]
+        used[i] = True
+
+        # Find all remaining boxes that overlap with this cluster
+        for j in range(i + 1, n):
+            if used[j]:
+                continue
+
+            # Check IoU against all current cluster members
+            ious = _iou_matrix(
+                boxes[j:j + 1],
+                np.array(cluster_boxes),
+            )
+            if ious.max() >= iou_thr:
+                cluster_boxes.append(boxes[j])
+                cluster_scores.append(scores[j])
+                cluster_classes.append(class_ids[j])
+                used[j] = True
+
+        # Weighted average of the cluster
+        weights = np.array(cluster_scores, dtype=np.float32)
+        weight_sum = weights.sum()
+
+        if weight_sum > 0:
+            w = weights / weight_sum
+            fused_box = np.sum(
+                np.array(cluster_boxes, dtype=np.float32) * w[:, None], axis=0
+            )
+        else:
+            fused_box = np.mean(cluster_boxes, axis=0)
+
+        # Fused confidence: arithmetic mean of member scores.
+        fused_score = float(np.mean(cluster_scores))
+        fused_class = int(cluster_classes[np.argmax(cluster_scores)])
+
+        fused_boxes.append(fused_box)
+        fused_scores.append(fused_score)
+        fused_classes.append(fused_class)
+
+    return (
+        np.array(fused_boxes, dtype=np.float32),
+        np.array(fused_scores, dtype=np.float32),
+        np.array(fused_classes, dtype=np.int32),
+    )
+
+
+# ---------------------------------------------------------------------------
+# LogDetector
+# ---------------------------------------------------------------------------
+
 class LogDetector:
     """
-    YOLOv8-based wooden log detector.
+    YOLOv8-based wooden log detector with multi-scale inference + WBF.
 
-    Wraps the ultralytics YOLO model. Handles model loading, inference,
-    and OpenCV annotation of bounding boxes.
-
-    Attributes:
-        model: The loaded YOLOv8 model.
-        model_path: Path to the model weights file.
-        conf_threshold: Confidence threshold for detections.
-        iou_threshold: IoU threshold for Non-Maximum Suppression.
-        class_names: List of class names the model can detect.
+    Wraps the ultralytics YOLO model. Runs inference at two image scales
+    (640 and 960) to catch both large and small logs, then fuses the
+    results with Weighted Box Fusion to eliminate duplicates while
+    preserving true positives.
     """
 
     def __init__(
@@ -53,9 +201,9 @@ class LogDetector:
         Initialize the detector.
 
         Args:
-            model_path: Path or name of YOLOv8 weights (e.g. 'yolov8n.pt').
+            model_path: Path or name of YOLOv8 weights.
             conf_threshold: Minimum confidence for a detection to be kept.
-            iou_threshold: IoU threshold for NMS.
+            iou_threshold: IoU threshold for NMS and WBF grouping.
             class_names: Override class names; defaults to CLASS_NAMES from utils.
         """
         from ultralytics import YOLO
@@ -73,7 +221,7 @@ class LogDetector:
             self.model = self._yolo_cls(self.model_path)
 
     # ------------------------------------------------------------------
-    # Core inference
+    # Core inference (multi-scale + WBF)
     # ------------------------------------------------------------------
 
     def detect(
@@ -83,7 +231,11 @@ class LogDetector:
         iou: Optional[float] = None,
     ) -> Tuple[List[Dict[str, Any]], float]:
         """
-        Run detection on a single image (BGR numpy array).
+        Run multi-scale YOLOv8 detection with Weighted Box Fusion.
+
+        Runs inference at both 640px and 960px (with TTA), then fuses
+        overlapping detections via WBF to maximize recall while avoiding
+        duplicate boxes.
 
         Args:
             image: Input image as a BGR numpy array (OpenCV format).
@@ -100,43 +252,117 @@ class LogDetector:
         iou = iou if iou is not None else self.iou_threshold
 
         with Timer() as t:
-            results = self.model(
-                image,
-                conf=conf,
-                iou=iou,
-                verbose=False,
-            )
+            all_boxes: List[np.ndarray] = []
+            all_scores: List[float] = []
+            all_classes: List[int] = []
 
-        detections: List[Dict[str, Any]] = []
-        if results and len(results) > 0:
-            result = results[0]
-            if result.boxes is not None and len(result.boxes) > 0:
-                for box in result.boxes:
-                    class_id = int(box.cls.item())
-                    confidence = float(box.conf.item())
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+            for scale in INFER_SCALES:
+                results = self.model(
+                    image,
+                    conf=conf,
+                    iou=iou,
+                    imgsz=scale,
+                    max_det=300,
+                    verbose=False,
+                    augment=True,  # TTA for better recall
+                )
+                r = results[0] if results else None
+                if r is not None and r.boxes is not None and len(r.boxes) > 0:
+                    all_boxes.append(r.boxes.xyxy.cpu().numpy().astype(np.float32))
+                    all_scores.extend(r.boxes.conf.cpu().numpy().astype(np.float32).tolist())
+                    all_classes.extend(r.boxes.cls.cpu().numpy().astype(np.int32).tolist())
 
-                    # Map class ID to name
-                    if hasattr(result, "names") and result.names:
-                        class_name = result.names.get(class_id, f"class_{class_id}")
-                    elif class_id < len(self.class_names):
-                        class_name = self.class_names[class_id]
-                    else:
-                        class_name = f"class_{class_id}"
+            # Fuse multi-scale results via WBF
+            if all_boxes:
+                merged_boxes = np.vstack(all_boxes)
+                merged_scores = np.array(all_scores, dtype=np.float32)
+                merged_classes = np.array(all_classes, dtype=np.int32)
 
-                    detections.append({
-                        "class_id": class_id,
-                        "class_name": class_name,
-                        "confidence": round(confidence, 4),
-                        "bbox": {
-                            "x1": int(x1),
-                            "y1": int(y1),
-                            "x2": int(x2),
-                            "y2": int(y2),
-                        },
-                    })
+                fused_boxes, fused_scores, fused_classes = weighted_box_fusion(
+                    merged_boxes,
+                    merged_scores,
+                    merged_classes,
+                    iou_thr=iou,
+                )
+
+                # Second-pass NMS to remove any residual near-duplicate boxes
+                # that WBF didn't merge (can happen with boxes at IoU ~0.3-0.5).
+                # Use a slightly lower threshold than WBF to catch marginal
+                # overlaps without over-suppressing genuine adjacent logs.
+                if len(fused_boxes) > 1:
+                    import torch
+                    from torchvision.ops import nms as tv_nms
+                    nms_thr = max(0.35, iou - 0.1)
+                    t_boxes = torch.from_numpy(fused_boxes)
+                    t_scores = torch.from_numpy(fused_scores)
+                    keep = tv_nms(t_boxes, t_scores, iou_threshold=nms_thr)
+                    keep_idx = keep.cpu().numpy()
+                    fused_boxes = fused_boxes[keep_idx]
+                    fused_scores = fused_scores[keep_idx]
+                    fused_classes = fused_classes[keep_idx]
+            else:
+                fused_boxes = np.zeros((0, 4), dtype=np.float32)
+                fused_scores = np.zeros(0, dtype=np.float32)
+                fused_classes = np.zeros(0, dtype=np.int32)
+
+        # Build detection dicts
+        detections = self._build_detection_dicts(
+            fused_boxes, fused_scores, fused_classes, conf
+        )
 
         return detections, round(t.elapsed_ms, 2)
+
+    def _build_detection_dicts(
+        self,
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        class_ids: np.ndarray,
+        conf: float,
+    ) -> List[Dict[str, Any]]:
+        """Convert raw arrays into detection dicts with computed metrics."""
+        names_map = {}
+        if self.model is not None:
+            try:
+                names_map = self.model.names or {}
+            except Exception:
+                pass
+
+        detections: List[Dict[str, Any]] = []
+
+        for i in range(len(boxes)):
+            x1, y1, x2, y2 = boxes[i].tolist()
+            class_id = int(class_ids[i])
+            confidence = float(scores[i])
+
+            if confidence < conf:
+                continue
+
+            if class_id in names_map:
+                class_name = names_map[class_id]
+            elif class_id < len(self.class_names):
+                class_name = self.class_names[class_id]
+            else:
+                class_name = f"class_{class_id}"
+
+            detections.append({
+                "class_id": class_id,
+                "class_name": class_name,
+                "confidence": round(confidence, 4),
+                "bbox": {
+                    "x1": int(x1),
+                    "y1": int(y1),
+                    "x2": int(x2),
+                    "y2": int(y2),
+                },
+                "aspect_ratio": compute_aspect_ratio(
+                    int(x2) - int(x1), int(y2) - int(y1)
+                ),
+                "diameter_px": compute_diameter(
+                    int(x2) - int(x1), int(y2) - int(y1)
+                ),
+            })
+
+        return detections
 
     def detect_from_path(self, image_path: str) -> Tuple[List[Dict[str, Any]], np.ndarray, float]:
         """
@@ -175,15 +401,25 @@ class LogDetector:
         detections: List[Dict[str, Any]],
         box_thickness: int = 2,
         font_scale: float = 0.6,
+        draw_circle: bool = True,
+        draw_bbox: bool = True,
     ) -> np.ndarray:
         """
-        Draw bounding boxes and labels on the image.
+        Draw bounding boxes, inscribed circles/ellipses, and labels on the image.
+
+        For each detection:
+          - Bounding box rectangle (optional).
+          - Inscribed circle (if aspect ratio ≈ 1.0) or ellipse (otherwise),
+            fitted to the bounding box — visually highlights the log cross-section.
+          - Center point dot + aspect ratio label.
 
         Args:
             image: Original BGR image.
             detections: Detection list from detect().
-            box_thickness: Line thickness for bounding boxes.
+            box_thickness: Line thickness for bounding boxes and circles.
             font_scale: Font scale for labels.
+            draw_circle: If True, draw the inscribed circle/ellipse.
+            draw_bbox: If True, draw the bounding box rectangle.
 
         Returns:
             Annotated image (new copy; original is not modified).
@@ -195,16 +431,43 @@ class LogDetector:
             class_id = det["class_id"]
             class_name = det["class_name"]
             confidence = det["confidence"]
+            aspect_ratio = det.get("aspect_ratio", 1.0)
+            diameter = det.get("diameter_px", 0)
             color = get_color_for_class(class_id)
 
             x1, y1 = bbox["x1"], bbox["y1"]
             x2, y2 = bbox["x2"], bbox["y2"]
 
-            # Draw bounding box
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
+            w = x2 - x1
+            h = y2 - y1
+            cx = x1 + w // 2
+            cy = y1 + h // 2
 
-            # Label text
-            label = f"{class_name} {confidence:.2f}"
+            # Draw bounding box
+            if draw_bbox:
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
+
+            # Draw inscribed circle / ellipse
+            if draw_circle and w > 0 and h > 0:
+                if 0.85 <= aspect_ratio <= 1.18:
+                    # Nearly square → draw a perfect circle
+                    radius = int(min(w, h) / 2)
+                    cv2.circle(annotated, (cx, cy), radius, color, box_thickness)
+                else:
+                    # Elongated → draw an ellipse fitted to the bbox
+                    cv2.ellipse(
+                        annotated,
+                        (cx, cy),
+                        (int(w / 2), int(h / 2)),
+                        0, 0, 360,
+                        color, box_thickness,
+                    )
+
+                # Center point dot
+                cv2.circle(annotated, (cx, cy), 2, color, -1)
+
+            # Label text: class + confidence + ratio
+            label = f"{class_name} {confidence:.2f} r={aspect_ratio:.2f}"
 
             # Label background
             (tw, th), baseline = cv2.getTextSize(

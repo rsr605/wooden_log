@@ -112,6 +112,8 @@ class TestImageUpload:
                     "class_name": "wooden_log",
                     "confidence": 0.92,
                     "bbox": {"x1": 10, "y1": 20, "x2": 80, "y2": 90},
+                    "aspect_ratio": 1.06,
+                    "diameter_px": 70,
                 }
             ],
             45.5,  # processing time ms

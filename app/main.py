@@ -5,6 +5,8 @@ Routes:
   GET  /            → Upload form (index)
   POST /detect      → Upload + detect image or video, display annotated result
   POST /api/detect  → API endpoint (POST multipart, JSON response)
+  POST /analyze     → Segmentation analysis: circles + geometry per log (HTML)
+  POST /api/analyze → Segmentation analysis API (JSON)
   GET  /api/info    → Model configuration info (JSON)
   GET  /health      → Health check (JSON)
 """
@@ -13,6 +15,10 @@ import os
 import sys
 import json
 import logging
+
+# Load .env file into os.environ BEFORE any module reads env vars
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from pathlib import Path
 from typing import Optional
 
@@ -274,6 +280,120 @@ def _register_routes(app: Flask) -> None:
             "stats": _get_result_stats(detections),
         }
         return jsonify(result), 200
+
+    @app.route("/analyze", methods=["POST"])
+    def analyze_image():
+        """Handle image upload → segmentation analysis → geometry display."""
+        if "file" not in request.files:
+            flash("No file selected.", "error")
+            return redirect(url_for("index"))
+
+        file_storage = request.files["file"]
+        try:
+            filename = _save_upload(file_storage, app.config["UPLOAD_FOLDER"])
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("index"))
+
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+
+        if is_allowed_video(filename):
+            flash(
+                "Video analysis is not supported for segmentation mode. "
+                "Please upload an image.",
+                "error",
+            )
+            return redirect(url_for("index"))
+
+        image = cv2.imread(filepath)
+        if image is None:
+            flash("Could not read image file. It may be corrupted.", "error")
+            return redirect(url_for("index"))
+
+        # Optional confidence override
+        conf_override = None
+        if "confidence" in request.form:
+            try:
+                conf_override = float(request.form["confidence"])
+            except (ValueError, TypeError):
+                pass
+
+        from app.detector import get_detector
+        from app.segmentation import LogAnalyzer
+
+        detector = get_detector()
+        detections, det_elapsed = detector.detect(image, conf=conf_override)
+
+        analyzer = LogAnalyzer()
+        analysis_results, annotated = analyzer.analyze(image, detections)
+
+        result_filename = generate_hashed_filename(filename, prefix="analysis_")
+        result_path = os.path.join(app.config["RESULTS_FOLDER"], result_filename)
+        cv2.imwrite(result_path, annotated)
+
+        h, w = image.shape[:2]
+        stats = _get_result_stats(detections)
+
+        return render_template(
+            "analysis.html",
+            original_image=f"uploads/{filename}",
+            result_image=f"results/{result_filename}",
+            measurements=analysis_results,
+            stats=stats,
+            processing_time_ms=round(det_elapsed, 2),
+            image_width=w,
+            image_height=h,
+        )
+
+    @app.route("/api/analyze", methods=["POST"])
+    def api_analyze():
+        """Segmentation analysis API endpoint (JSON response)."""
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file_storage = request.files["file"]
+        try:
+            filename = _save_upload(file_storage, app.config["UPLOAD_FOLDER"])
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        image = cv2.imread(filepath)
+        if image is None:
+            return jsonify({"error": "Cannot read image"}), 400
+
+        conf_override = None
+        if "confidence" in request.form:
+            try:
+                conf_override = float(request.form["confidence"])
+            except (ValueError, TypeError):
+                pass
+
+        from app.detector import get_detector
+        from app.segmentation import LogAnalyzer
+
+        detector = get_detector()
+        detections, det_elapsed = detector.detect(image, conf=conf_override)
+
+        analyzer = LogAnalyzer()
+        analysis_results, annotated = analyzer.analyze(image, detections)
+
+        # Save annotated image
+        result_filename = generate_hashed_filename(filename, prefix="analysis_")
+        result_path = os.path.join(app.config["RESULTS_FOLDER"], result_filename)
+        cv2.imwrite(result_path, annotated)
+
+        h, w = image.shape[:2]
+
+        return jsonify({
+            "filename": filename,
+            "image_width": w,
+            "image_height": h,
+            "count": len(analysis_results),
+            "logs": analysis_results,
+            "processing_time_ms": round(det_elapsed, 2),
+            "annotated_image_url": f"/results/{result_filename}",
+        }), 200
 
     @app.route("/api/info", methods=["GET"])
     def api_info():

@@ -31,6 +31,9 @@
     <!-- Annotated Result -->
     <div class="result-card">
         <h3>Detection Result {% if is_video %}(Annotated Video){% endif %}</h3>
+        {% if not is_video %}
+        <p class="hint" style="margin-bottom:0.75rem;">Each detection shows a bounding box + inscribed circle/ellipse with aspect ratio.</p>
+        {% endif %}
         {% if is_video %}
         <video controls width="100%">
             <source src="{{ url_for('static', filename=result_image) }}">
@@ -94,6 +97,8 @@
                     <th>Class</th>
                     <th>Confidence</th>
                     <th>Bounding Box (x1, y1, x2, y2)</th>
+                    <th>Aspect Ratio (w/h)</th>
+                    <th>Diameter (px)</th>
                     <th>Confidence Bar</th>
                 </tr>
             </thead>
@@ -106,6 +111,8 @@
                     <td class="mono">
                         ({{ det.bbox.x1 }}, {{ det.bbox.y1 }}, {{ det.bbox.x2 }}, {{ det.bbox.y2 }})
                     </td>
+                    <td class="mono"><strong>{{ "%.2f"|format(det.aspect_ratio) }}</strong></td>
+                    <td class="mono">{{ det.diameter_px }}</td>
                     <td>
                         <div class="confidence-bar">
                             <div class="confidence-fill" style="width: {{ (det.confidence * 100)|round }}%"></div>

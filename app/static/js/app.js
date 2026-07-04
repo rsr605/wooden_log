@@ -13,6 +13,23 @@ document.addEventListener("DOMContentLoaded", () => {
     const confidenceSlider = document.getElementById("confidence");
     const confidenceValue = document.getElementById("confidence-value");
 
+    // --- Mode toggle (bounding box vs segmentation analysis) ---
+    const modeButtons = document.querySelectorAll(".mode-btn");
+    modeButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            modeButtons.forEach((b) => b.classList.remove("active"));
+            btn.classList.add("active");
+            detectForm.action = btn.dataset.action;
+            // Update button text/spinner text for analysis mode
+            const isAnalysis = btn.dataset.action === "/analyze";
+            if (isAnalysis) {
+                btnDetect.querySelector(".btn-text").textContent = "📐 Analyze Logs";
+            } else {
+                btnDetect.querySelector(".btn-text").textContent = "🔍 Detect Wooden Logs";
+            }
+        });
+    });
+
     // --- Click to open file dialog ---
     if (dropzone) {
         dropzone.addEventListener("click", () => fileInput.click());
@@ -113,12 +130,16 @@ document.addEventListener("DOMContentLoaded", () => {
             btnDetect.querySelector(".btn-text").textContent = "Processing...";
 
             // Create loading overlay
+            const isAnalysis = detectForm.action.includes("/analyze");
+            const spinnerText = isAnalysis
+                ? "Running segmentation analysis..."
+                : "Detecting wooden logs...";
             const overlay = document.createElement("div");
             overlay.className = "loading-overlay active";
             overlay.innerHTML = `
                 <div class="spinner">
                     <div class="spinner-circle"></div>
-                    <div class="spinner-text">Detecting wooden logs...</div>
+                    <div class="spinner-text">${spinnerText}</div>
                 </div>
             `;
             document.body.appendChild(overlay);

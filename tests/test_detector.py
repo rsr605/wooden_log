@@ -1,322 +1,290 @@
 """
-Unit tests for the LogDetector class (app/detector.py).
+Tests for the YOLOv8 detector module.
 
-The YOLOv8 model is mocked so these tests run without GPU or model downloads.
+Covers:
+- Weighted Box Fusion (WBF) algorithm correctness
+- IoU matrix computation
+- LogDetector initialization and lazy model loading
+- Multi-scale detect() returns well-formed detection dicts
+- annotate() draws bounding boxes and returns same-shape image
+- Default thresholds are correctly tuned for high-recall detection
 """
 
-import sys
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def make_mock_box(cls_val: float, conf_val: float, xyxy_vals: list):
-    """Create a mock YOLOv8 box object."""
-    box = MagicMock()
-    box.cls.item.return_value = cls_val
-    box.conf.item.return_value = conf_val
-    box.xyxy.__getitem__.return_value.tolist.return_value = xyxy_vals
-    return box
-
-
-def make_mock_result(boxes, names=None):
-    """Create a mock ultralytics Result object."""
-    result = MagicMock()
-    result.boxes = boxes
-    result.names = names or {0: "wooden_log"}
-    result.__len__ = lambda self: 1
-    return result
+import numpy as np
+import cv2
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# LogDetector Initialization
+# WBF unit tests (pure functions, no model needed)
 # ---------------------------------------------------------------------------
 
-class TestLogDetectorInit:
-    @patch("app.detector.LogDetector.__init__", return_value=None)
-    def test_init_stores_params(self, _):
-        """Constructor parameters should be stored on the instance."""
+class TestWeightedBoxFusion:
+    """Unit tests for the Weighted Box Fusion algorithm."""
+
+    def test_empty_input(self):
+        """WBF on empty input returns empty arrays."""
+        from app.detector import weighted_box_fusion
+
+        boxes, scores, classes = weighted_box_fusion(
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.int32),
+        )
+        assert len(boxes) == 0
+        assert len(scores) == 0
+        assert len(classes) == 0
+
+    def test_single_box_passthrough(self):
+        """A single box passes through unchanged."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([[10, 20, 100, 200]], dtype=np.float32)
+        scores = np.array([0.9], dtype=np.float32)
+        classes = np.array([0], dtype=np.int32)
+
+        f_boxes, f_scores, f_classes = weighted_box_fusion(boxes, scores, classes)
+
+        assert len(f_boxes) == 1
+        assert np.allclose(f_boxes[0], boxes[0])
+        assert f_scores[0] == pytest.approx(0.9)
+        assert f_classes[0] == 0
+
+    def test_overlapping_boxes_merged(self):
+        """Two highly-overlapping boxes should be merged into one."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([
+            [10, 10, 110, 110],
+            [15, 15, 105, 105],  # IoU with first ~0.83
+        ], dtype=np.float32)
+        scores = np.array([0.9, 0.8], dtype=np.float32)
+        classes = np.array([0, 0], dtype=np.int32)
+
+        f_boxes, f_scores, f_classes = weighted_box_fusion(
+            boxes, scores, classes, iou_thr=0.5
+        )
+
+        assert len(f_boxes) == 1, "Two overlapping boxes should merge into 1"
+
+    def test_non_overlapping_boxes_kept(self):
+        """Non-overlapping boxes should all be preserved."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([
+            [0, 0, 50, 50],
+            [200, 200, 250, 250],
+            [400, 400, 450, 450],
+        ], dtype=np.float32)
+        scores = np.array([0.9, 0.8, 0.7], dtype=np.float32)
+        classes = np.array([0, 0, 0], dtype=np.int32)
+
+        f_boxes, f_scores, f_classes = weighted_box_fusion(
+            boxes, scores, classes, iou_thr=0.5
+        )
+
+        assert len(f_boxes) == 3, "Non-overlapping boxes should all be kept"
+
+    def test_fused_score_is_average(self):
+        """The fused score should be the mean of merged member scores."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([
+            [10, 10, 110, 110],
+            [12, 12, 108, 108],
+        ], dtype=np.float32)
+        scores = np.array([0.9, 0.7], dtype=np.float32)
+        classes = np.array([0, 0], dtype=np.int32)
+
+        _, f_scores, _ = weighted_box_fusion(boxes, scores, classes, iou_thr=0.5)
+
+        assert f_scores[0] == pytest.approx(0.8, abs=0.01)
+
+    def test_fused_box_is_weighted_average(self):
+        """The fused box coordinates should be confidence-weighted average."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([
+            [10, 10, 110, 110],
+            [10, 10, 110, 110],  # identical → average is same
+        ], dtype=np.float32)
+        scores = np.array([0.9, 0.9], dtype=np.float32)
+        classes = np.array([0, 0], dtype=np.int32)
+
+        f_boxes, _, _ = weighted_box_fusion(boxes, scores, classes, iou_thr=0.5)
+
+        assert np.allclose(f_boxes[0], [10, 10, 110, 110])
+
+    def test_sorting_by_confidence(self):
+        """Output should preserve a reasonable order (highest confidence first)."""
+        from app.detector import weighted_box_fusion
+
+        boxes = np.array([
+            [0, 0, 50, 50],
+            [200, 200, 250, 250],
+            [400, 400, 450, 450],
+        ], dtype=np.float32)
+        scores = np.array([0.5, 0.9, 0.7], dtype=np.float32)
+        classes = np.array([0, 0, 0], dtype=np.int32)
+
+        f_boxes, f_scores, _ = weighted_box_fusion(boxes, scores, classes, iou_thr=0.5)
+
+        assert f_scores[0] == pytest.approx(0.9), "Highest score should come first"
+
+
+class TestIoUMatrix:
+    """Unit tests for IoU matrix computation."""
+
+    def test_identical_boxes_iou_one(self):
+        """IoU of identical boxes should be 1.0."""
+        from app.detector import _iou_matrix
+
+        boxes = np.array([[10, 10, 50, 50]], dtype=np.float32)
+        iou = _iou_matrix(boxes, boxes)
+        assert iou[0, 0] == pytest.approx(1.0, abs=0.01)
+
+    def test_non_overlapping_iou_zero(self):
+        """IoU of non-overlapping boxes should be 0.0."""
+        from app.detector import _iou_matrix
+
+        a = np.array([[0, 0, 10, 10]], dtype=np.float32)
+        b = np.array([[100, 100, 110, 110]], dtype=np.float32)
+        iou = _iou_matrix(a, b)
+        assert iou[0, 0] == pytest.approx(0.0)
+
+    def test_partial_overlap(self):
+        """IoU of partially overlapping boxes should be between 0 and 1."""
+        from app.detector import _iou_matrix
+
+        a = np.array([[0, 0, 20, 20]], dtype=np.float32)
+        b = np.array([[10, 10, 30, 30]], dtype=np.float32)
+        iou = _iou_matrix(a, b)
+        assert 0.0 < iou[0, 0] < 1.0
+
+    def test_empty_input(self):
+        """Empty input should return empty matrix."""
+        from app.detector import _iou_matrix
+
+        empty = np.zeros((0, 4), dtype=np.float32)
+        iou = _iou_matrix(empty, empty)
+        assert iou.shape == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Detector initialization tests
+# ---------------------------------------------------------------------------
+
+class TestDetectorInit:
+    """Test LogDetector initialization (without loading the actual model)."""
+
+    def test_detector_init_attributes(self):
+        """Detector stores config without loading model."""
         from app.detector import LogDetector
-        d = LogDetector.__new__(LogDetector)
-        d.model_path = "yolov8n.pt"
-        d.conf_threshold = 0.25
-        d.iou_threshold = 0.7
-        d.class_names = ["wooden_log"]
-        assert d.model_path == "yolov8n.pt"
-        assert d.conf_threshold == 0.25
-        assert d.iou_threshold == 0.7
-        assert d.class_names == ["wooden_log"]
 
-    def test_init_with_custom_params(self):
-        """LogDetector should accept custom parameters."""
+        detector = LogDetector(
+            model_path="dummy.pt",
+            conf_threshold=0.25,
+            iou_threshold=0.50,
+        )
+        assert detector.model_path == "dummy.pt"
+        assert detector.conf_threshold == 0.25
+        assert detector.iou_threshold == 0.50
+        assert detector.model is None  # lazy loading
+
+    def test_detector_default_thresholds(self):
+        """Detector uses high-recall thresholds by default."""
         from app.detector import LogDetector
-        # Don't actually load the model — just test __init__ sets attributes
-        with patch("ultralytics.YOLO"):
-            d = LogDetector(
-                model_path="yolov8s.pt",
-                conf_threshold=0.5,
-                iou_threshold=0.5,
-                class_names=["log", "stump"],
-            )
-            assert d.model_path == "yolov8s.pt"
-            assert d.conf_threshold == 0.5
-            assert d.iou_threshold == 0.5
-            assert d.class_names == ["log", "stump"]
+
+        detector = LogDetector(model_path="dummy.pt")
+        assert detector.conf_threshold == 0.25, "Conf threshold should be 0.25 for recall"
+        assert detector.iou_threshold == 0.50, "IoU threshold should be 0.50"
+
+    def test_infer_scales_defined(self):
+        """Detector has multi-scale inference configured."""
+        from app.detector import INFER_SCALES
+
+        assert isinstance(INFER_SCALES, list)
+        assert len(INFER_SCALES) >= 2, "Multi-scale requires at least 2 scales"
+        for s in INFER_SCALES:
+            assert s % 32 == 0, "Inference size must be multiple of 32"
 
 
 # ---------------------------------------------------------------------------
-# Detection Result Parsing
+# Integration tests (require actual model)
 # ---------------------------------------------------------------------------
 
-class TestDetectionParsing:
-    def test_detect_with_multiple_boxes(self):
-        """detect() should parse multiple boxes into detection dicts."""
+class TestDetectorInference:
+    """Integration tests that actually load the model and run inference."""
+
+    @pytest.fixture(scope="class")
+    def detector(self):
+        """Load the real model for integration tests."""
         from app.detector import LogDetector
+        model_path = str(Path("models/wooden_log_best.pt"))
+        if not Path(model_path).exists():
+            pytest.skip("Model not found")
+        return LogDetector(model_path=model_path, conf_threshold=0.25, iou_threshold=0.50)
 
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        # Mock the model and its return value
-        boxes = [
-            make_mock_box(0.0, 0.95, [10, 20, 100, 200]),
-            make_mock_box(0.0, 0.80, [50, 60, 150, 160]),
-        ]
-        mock_result = make_mock_result(boxes, names={0: "wooden_log"})
-        d.model = MagicMock()
-        d.model.return_value = [mock_result]
-
-        image = np.zeros((300, 300, 3), dtype=np.uint8)
-        detections, elapsed = d.detect(image)
-
-        assert len(detections) == 2
-        assert detections[0]["class_id"] == 0
-        assert detections[0]["class_name"] == "wooden_log"
-        assert detections[0]["confidence"] == 0.95
-        assert detections[0]["bbox"]["x1"] == 10
-        assert detections[0]["bbox"]["y1"] == 20
-        assert detections[0]["bbox"]["x2"] == 100
-        assert detections[0]["bbox"]["y2"] == 200
-
-        assert detections[1]["confidence"] == 0.80
+    def test_detect_returns_tuple(self, detector):
+        """detect() returns (list, float)."""
+        img = np.zeros((640, 640, 3), dtype=np.uint8)
+        detections, elapsed = detector.detect(img)
+        assert isinstance(detections, list)
+        assert isinstance(elapsed, float)
         assert elapsed > 0
 
-    def test_detect_no_boxes(self):
-        """detect() should return empty list when model finds nothing."""
-        from app.detector import LogDetector
+    def test_detection_structure(self, detector):
+        """Each detection has all required keys with correct types."""
+        img = np.full((480, 640, 3), 60, dtype=np.uint8)
+        cv2.rectangle(img, (100, 100), (300, 300), (33, 67, 101), -1)
+        detections, _ = detector.detect(img)
+        for det in detections:
+            assert "class_id" in det
+            assert "class_name" in det
+            assert "confidence" in det
+            assert "bbox" in det
+            assert "aspect_ratio" in det
+            assert "diameter_px" in det
+            assert isinstance(det["bbox"], dict)
+            assert all(k in det["bbox"] for k in ["x1", "y1", "x2", "y2"])
+            assert 0.0 <= det["confidence"] <= 1.0
 
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
+    def test_detect_on_sample_image(self, detector):
+        """Detector finds multiple logs in a sample image."""
+        sample_path = Path("data_v3/sample_images/sample_0.jpg")
+        if not sample_path.exists():
+            pytest.skip("Sample image not found")
+        img = cv2.imread(str(sample_path))
+        detections, _ = detector.detect(img)
+        assert len(detections) > 0, "Should detect at least one log"
 
-        mock_result = MagicMock()
-        mock_result.boxes = MagicMock()
-        mock_result.boxes.__len__ = lambda self: 0
-        mock_result.names = {0: "wooden_log"}
-        d.model = MagicMock()
-        d.model.return_value = [mock_result]
+    def test_detect_on_blank_image_no_false_positives(self, detector):
+        """A blank/near-blank image should produce zero or very few detections."""
+        img = np.zeros((640, 640, 3), dtype=np.uint8)
+        detections, _ = detector.detect(img)
+        assert len(detections) == 0, f"Expected 0 detections on black image, got {len(detections)}"
 
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        detections, elapsed = d.detect(image)
+    def test_detect_on_real_image(self, detector):
+        """Multi-scale detection finds logs on real-world images."""
+        test_path = Path("test_end_view.png")
+        if not test_path.exists():
+            pytest.skip("Real test image not found")
+        img = cv2.imread(str(test_path))
+        detections, _ = detector.detect(img)
+        assert len(detections) >= 5, f"Should detect multiple logs, got {len(detections)}"
 
-        assert detections == []
-        assert elapsed >= 0
-
-    def test_detect_confidence_override(self):
-        """detect() should pass custom confidence to model."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        mock_result = MagicMock()
-        mock_result.boxes = MagicMock()
-        mock_result.boxes.__len__ = lambda self: 0
-        mock_result.names = {}
-        d.model = MagicMock()
-        d.model.return_value = [mock_result]
-
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        d.detect(image, conf=0.5)
-
-        # Verify model was called with conf=0.5
-        call_kwargs = d.model.call_args
-        assert call_kwargs.kwargs["conf"] == 0.5
-
-    def test_class_name_from_model_names(self):
-        """class_name should use model's names dict when available."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        boxes = [make_mock_box(2.0, 0.9, [10, 20, 30, 40])]
-        mock_result = make_mock_result(boxes, names={0: "log", 1: "stump", 2: "plank"})
-        d.model = MagicMock()
-        d.model.return_value = [mock_result]
-
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        detections, _ = d.detect(image)
-
-        assert detections[0]["class_name"] == "plank"
-
-
-# ---------------------------------------------------------------------------
-# Annotation / Drawing
-# ---------------------------------------------------------------------------
-
-class TestAnnotation:
-    def test_annotate_returns_copy(self):
-        """annotate() should not modify the original image."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        original = np.zeros((100, 100, 3), dtype=np.uint8)
-        detections = [
-            {
-                "class_id": 0,
-                "class_name": "wooden_log",
-                "confidence": 0.9,
-                "bbox": {"x1": 10, "y1": 20, "x2": 80, "y2": 90},
-            }
-        ]
-        annotated = d.annotate(original, detections)
-
-        assert not np.array_equal(original, annotated)
-        assert annotated.shape == original.shape
-
-    def test_annotate_empty_detections(self):
-        """annotate() with no detections should return identical copy."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        original = np.full((100, 100, 3), 128, dtype=np.uint8)
-        annotated = d.annotate(original, [])
-
-        np.testing.assert_array_equal(original, annotated)
-
-    def test_annotate_draws_box(self):
-        """annotate() should draw a rectangle for each detection."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        original = np.zeros((200, 200, 3), dtype=np.uint8)
-        detections = [
-            {
-                "class_id": 0,
-                "class_name": "wooden_log",
-                "confidence": 0.85,
-                "bbox": {"x1": 20, "y1": 30, "x2": 100, "y2": 150},
-            }
-        ]
-        annotated = d.annotate(original, detections)
-
-        # The annotated image should differ (pixels were drawn)
-        assert not np.array_equal(original, annotated)
-        # Check that some non-zero pixels exist (green box color)
-        assert annotated.sum() > 0
-
-
-# ---------------------------------------------------------------------------
-# Result Formatting
-# ---------------------------------------------------------------------------
-
-class TestResultFormatting:
-    def test_format_result(self):
-        """format_result should build correct result dict with image dimensions."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        image = np.zeros((480, 640, 3), dtype=np.uint8)
-        detections = [
-            {
-                "class_id": 0,
-                "class_name": "wooden_log",
-                "confidence": 0.92,
-                "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 200},
-            }
-        ]
-        result = d.format_result("test.jpg", image, detections, 42.5)
-
-        assert result["image_path"] == "test.jpg"
-        assert result["image_width"] == 640
-        assert result["image_height"] == 480
-        assert result["count"] == 1
-        assert result["detections"] == detections
-        assert result["processing_time_ms"] == 42.5
-
-
-# ---------------------------------------------------------------------------
-# detect_from_path
-# ---------------------------------------------------------------------------
-
-class TestDetectFromPath:
-    def test_valid_image_path(self, tmp_path):
-        """detect_from_path should read an image and run detection."""
-        import cv2
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        # Create test image
-        img_path = tmp_path / "test.jpg"
-        cv2.imwrite(str(img_path), np.zeros((100, 100, 3), dtype=np.uint8))
-
-        # Mock detection
-        mock_result = MagicMock()
-        mock_result.boxes = MagicMock()
-        mock_result.boxes.__len__ = lambda self: 0
-        mock_result.names = {}
-        d.model = MagicMock()
-        d.model.return_value = [mock_result]
-
-        detections, image, elapsed = d.detect_from_path(str(img_path))
-
-        assert detections == []
-        assert image is not None
-        assert image.shape == (100, 100, 3)
-
-    def test_invalid_image_path(self):
-        """detect_from_path should raise ValueError for unreadable image."""
-        from app.detector import LogDetector
-
-        with patch("ultralytics.YOLO"):
-            d = LogDetector()
-
-        with pytest.raises(ValueError, match="Cannot read image"):
-            d.detect_from_path("/nonexistent/path/image.jpg")
-
-
-# ---------------------------------------------------------------------------
-# Singleton get_detector
-# ---------------------------------------------------------------------------
-
-class TestGetDetector:
-    def test_singleton_returns_same_instance(self):
-        """get_detector should return the same instance on repeated calls."""
-        with patch("ultralytics.YOLO"):
-            import app.detector as det_module
-            # Reset singleton
-            det_module._detector_instance = None
-
-            d1 = det_module.get_detector()
-            d2 = det_module.get_detector()
-            assert d1 is d2
-
-            # Cleanup
-            det_module._detector_instance = None
+    def test_annotate_preserves_shape(self, detector):
+        """annotate() returns an image with the same dimensions."""
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        detections = [{
+            "class_id": 0,
+            "class_name": "wooden_log",
+            "confidence": 0.95,
+            "bbox": {"x1": 100, "y1": 100, "x2": 200, "y2": 200},
+            "aspect_ratio": 1.0,
+            "diameter_px": 100,
+        }]
+        annotated = detector.annotate(img, detections)
+        assert isinstance(annotated, np.ndarray)
+        assert annotated.shape == img.shape

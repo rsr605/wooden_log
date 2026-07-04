@@ -1,54 +1,52 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
+# Filesystem-corrupted files (cannot be deleted/stat'd, must be ignored)
+yolov8n.pt
 
-# Virtual environments
-venv/
-env/
-.venv/
+# Base weight downloads (large, downloadable, not the trained model)
+yolov8s.pt
+yolov8n_base.pt
+yolov8n_fresh.pt
+models/yolov8n_base.pt
+models/yolov8n_fresh.pt
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# ML artifacts
-models/*.pt
-models/*.onnx
-models/*.engine
-runs/
-wandb/
-
-# Data (keep config, ignore generated images/labels)
+# Generated datasets (large)
+data_v2/
+data_v3/
+data_v4/
 data/images/
 data/labels/
-!data/.gitkeep
 
-# Uploads & results (generated at runtime)
-app/static/uploads/*
-app/static/results/*
-!app/static/uploads/.gitkeep
-!app/static/results/.gitkeep
+# Training artifacts
+training_workdir/
+runs/
+garbage_dir/
 
-# Env
-.env
-.env.local
-.env.production
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.egg-info/
+
+# Playwright
+.playwright-mcp/
+
+# Debug/test images at workspace root
+/*.png
+/*.pt
 
 # Logs
 *.log
 
-# Tool artifacts (do not commit)
-.playwright-mcp/
-*.png
-yolov8n.pt
+# Environment (managed by backend, never commit)
+.env
+.env.local
+.env.production
+
+# Runtime-generated uploads & results (detection outputs)
+app/static/uploads/
+app/static/results/
+
+# Corrupted .gitkeep files (filesystem corruption, cannot stat/delete)
+models/.gitkeep
+app/static/uploads/.gitkeep
+app/static/results/.gitkeep
+data/.gitkeep

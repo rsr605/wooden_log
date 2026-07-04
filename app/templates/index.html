@@ -9,6 +9,10 @@
 
 <div class="upload-card">
     <form id="detect-form" action="/detect" method="POST" enctype="multipart/form-data">
+        <div class="mode-toggle">
+            <button type="button" class="mode-btn active" data-action="/detect" id="mode-detect">📦 Bounding Box Detection</button>
+            <button type="button" class="mode-btn" data-action="/analyze" id="mode-analyze">📐 Segmentation Analysis</button>
+        </div>
         <div class="dropzone" id="dropzone">
             <div class="dropzone-content">
                 <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -64,7 +68,7 @@
 <div class="features">
     <div class="feature">
         <h3>🖼️ Image Detection</h3>
-        <p>Upload images and get bounding box annotations with confidence scores.</p>
+        <p>Get bounding boxes + inscribed circles/ellipses with confidence scores and aspect ratios.</p>
     </div>
     <div class="feature">
         <h3>🎬 Video Detection</h3>

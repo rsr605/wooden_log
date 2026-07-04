@@ -84,3 +84,49 @@ class TestSampleGenerator:
             img = cv2.imread(p)
             assert img is not None
             assert img.shape == (150, 200, 3)
+
+
+class TestEndViewGeneration:
+    """Tests for end-view circular log cross-section generation."""
+
+    def test_end_view_mode_produces_many_logs(self):
+        """End-view mode should generate dense piles (15+ logs)."""
+        gen = SampleGenerator(seed=42)
+        _, bboxes = gen.generate_single(640, 480, view_mode='end')
+        assert len(bboxes) >= 10, f"Expected 10+ logs in end-view, got {len(bboxes)}"
+
+    def test_end_view_bboxes_aspect_ratio_near_one(self):
+        """End-view log bboxes should tend to be roughly square (aspect ~1.0)."""
+        gen = SampleGenerator(seed=42)
+        _, bboxes = gen.generate_single(640, 480, view_mode='end')
+        # At least half should have aspect ratio between 0.6 and 1.4
+        square_count = 0
+        for b in bboxes:
+            w, h = b[3], b[4]
+            if w > 0 and h > 0:
+                ratio = w / h
+                if 0.6 <= ratio <= 1.4:
+                    square_count += 1
+        assert square_count >= len(bboxes) * 0.5, \
+            f"Expected 50%+ square bboxes, got {square_count}/{len(bboxes)}"
+
+    def test_mixed_view_mode_works(self):
+        """Mixed view mode should produce valid output."""
+        gen = SampleGenerator(seed=42)
+        image, bboxes = gen.generate_single(640, 480, view_mode='mixed')
+        assert image.shape == (480, 640, 3)
+        assert len(bboxes) > 0
+
+    def test_side_view_mode_still_works(self):
+        """Side-view mode (original) should still function."""
+        gen = SampleGenerator(seed=42)
+        image, bboxes = gen.generate_single(640, 480, view_mode='side')
+        assert image.shape == (480, 640, 3)
+        assert len(bboxes) > 0
+
+    def test_default_view_mode_random(self):
+        """Without specifying view_mode, generate_single should still work."""
+        gen = SampleGenerator(seed=42)
+        image, bboxes = gen.generate_single(640, 480)
+        assert image.shape == (480, 640, 3)
+        assert len(bboxes) > 0

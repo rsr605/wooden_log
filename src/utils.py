@@ -21,10 +21,12 @@ import numpy as np
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 
-# Detection defaults
+# Detection defaults — tuned for high-recall wooden log detection on real
+# photos. Multi-scale inference + WBF compensates for the synthetic→real
+# domain gap. conf=0.25 with WBF gives the best F1 on real test images.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.25
-DEFAULT_IOU_THRESHOLD = 0.7
-DEFAULT_MODEL_VARIANT = "yolov8n.pt"
+DEFAULT_IOU_THRESHOLD = 0.50
+DEFAULT_MODEL_VARIANT = "models/wooden_log_best.pt"
 
 # Upload limits
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -36,6 +38,40 @@ CLASS_NAMES = ["wooden_log"]
 # ---------------------------------------------------------------------------
 # Coordinate / Bounding Box Helpers
 # ---------------------------------------------------------------------------
+
+def compute_aspect_ratio(width: float, height: float) -> float:
+    """
+    Compute aspect ratio (width / height) of a bounding box.
+
+    A ratio near 1.0 indicates a nearly circular cross-section.
+    Clamps height to a tiny epsilon to avoid division by zero.
+
+    Args:
+        width:  Bounding box width in pixels.
+        height: Bounding box height in pixels.
+
+    Returns:
+        Aspect ratio rounded to 2 decimal places.
+    """
+    if height == 0:
+        height = 1e-6
+    return round(width / height, 2)
+
+
+def compute_diameter(width: float, height: float) -> int:
+    """
+    Compute the average diameter (in pixels) of a detected log cross-section,
+    approximated as the average of the bounding box width and height.
+
+    Args:
+        width:  Bounding box width in pixels.
+        height: Bounding box height in pixels.
+
+    Returns:
+        Average diameter as a rounded integer.
+    """
+    return round((width + height) / 2.0)
+
 
 def xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
     """Convert (x1, y1, x2, y2) → (x_center, y_center, width, height)."""

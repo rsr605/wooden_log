@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Wooden Log Analysis — Segmentation & Geometry{% endblock %}
+
+{% block content %}
+<div class="hero">
+    <h1>📐 Log Segmentation Analysis</h1>
+    <p class="subtitle">Instance segmentation with minimum enclosing circles & geometric measurements</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <span class="stat-value">{{ stats.count }}</span>
+        <span class="stat-label">Logs Detected</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-value">{{ stats.avg_confidence }}</span>
+        <span class="stat-label">Avg Confidence</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-value">{{ stats.max_confidence }}</span>
+        <span class="stat-label">Max Confidence</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-value">{{ processing_time_ms }}ms</span>
+        <span class="stat-label">Processing Time</span>
+    </div>
+</div>
+
+<div class="result-grid">
+    <div class="result-panel">
+        <h3>Original Image</h3>
+        <img src="{{ url_for('static', filename=original_image) }}" alt="Original" class="result-image">
+    </div>
+    <div class="result-panel">
+        <h3>Annotated — Min Enclosing Circles</h3>
+        <img src="{{ url_for('static', filename=result_image) }}" alt="Analyzed" class="result-image">
+    </div>
+</div>
+
+{% if measurements %}
+<div class="analysis-section">
+    <h2>📊 Geometric Measurements</h2>
+    <table class="detection-table analysis-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Class</th>
+                <th>Confidence</th>
+                <th>Center (x, y)</th>
+                <th>Radius (px)</th>
+                <th>Contour Area (px²)</th>
+                <th>Circle Area (px²)</th>
+                <th>Circularity</th>
+                <th>Area Ratio</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in measurements %}
+            <tr>
+                <td class="log-id">{{ m.id }}</td>
+                <td>{{ m.class_name }}</td>
+                <td>
+                    <div class="confidence-cell">
+                        <span>{{ "%.1f"|format(m.confidence * 100) }}%</span>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: {{ (m.confidence * 100)|round }}%"></div>
+                        </div>
+                    </div>
+                </td>
+                <td>({{ m.center.x }}, {{ m.center.y }})</td>
+                <td>{{ m.radius }}</td>
+                <td>{% if m.contour_area > 0 %}{{ "{:,}".format(m.contour_area|round(0, 'floor')|int) }}{% else %}N/A{% endif %}</td>
+                <td>{{ "{:,}".format(m.circle_area|round(0, 'floor')|int) }}</td>
+                <td>
+                    {% if m.circularity > 0 %}
+                    <span class="metric-pill {% if m.circularity > 0.85 %}metric-good{% elif m.circularity > 0.6 %}metric-ok{% else %}metric-low{% endif %}">
+                        {{ "%.3f"|format(m.circularity) }}
+                    </span>
+                    {% else %}
+                    <span class="metric-pill metric-low">N/A</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if m.area_ratio > 0 %}
+                    <span class="metric-pill {% if m.area_ratio > 0.8 %}metric-good{% elif m.area_ratio > 0.5 %}metric-ok{% else %}metric-low{% endif %}">
+                        {{ "%.3f"|format(m.area_ratio) }}
+                    </span>
+                    {% else %}
+                    <span class="metric-pill metric-low">N/A</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="analysis-section">
+    <h2>📐 Geometric Properties Explained</h2>
+    <div class="info-cards">
+        <div class="info-card">
+            <h4>🔵 Minimum Enclosing Circle</h4>
+            <p>The smallest circle that fully contains the log contour, computed via <code>cv2.minEnclosingCircle()</code>.</p>
+        </div>
+        <div class="info-card">
+            <h4>⭕ Circularity (4πA / P²)</h4>
+            <p>Ratio of contour area to the area of a perfect circle with the same perimeter. <strong>1.0</strong> = perfect circle.</p>
+        </div>
+        <div class="info-card">
+            <h4>📊 Area Ratio</h4>
+            <p>Fraction of the enclosing circle filled by the log contour. <strong>1.0</strong> = the log fills the circle completely.</p>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="empty-state">
+    <h3>No logs detected</h3>
+    <p>Try lowering the confidence threshold or using a different image.</p>
+</div>
+{% endif %}
+
+<div class="action-row">
+    <a href="/" class="btn-primary">🔍 Analyze Another Image</a>
+    <a href="/detect" class="btn-secondary">📦 Standard Detection</a>
+</div>
+{% endblock %}
