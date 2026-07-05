@@ -50,3 +50,6 @@ models/.gitkeep
 app/static/uploads/.gitkeep
 app/static/results/.gitkeep
 data/.gitkeep
+
+# Generated datasets (large)
+data_v5/

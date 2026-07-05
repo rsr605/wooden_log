@@ -32,7 +32,7 @@
         <img src="{{ url_for('static', filename=original_image) }}" alt="Original" class="result-image">
     </div>
     <div class="result-panel">
-        <h3>Annotated — Min Enclosing Circles</h3>
+        <h3>Annotated — Fitted Ellipses (L×B)</h3>
         <img src="{{ url_for('static', filename=result_image) }}" alt="Analyzed" class="result-image">
     </div>
 </div>
@@ -47,9 +47,10 @@
                 <th>Class</th>
                 <th>Confidence</th>
                 <th>Center (x, y)</th>
-                <th>Radius (px)</th>
+                <th>Length (px)</th>
+                <th>Breadth (px)</th>
                 <th>Contour Area (px²)</th>
-                <th>Circle Area (px²)</th>
+                <th>Ellipse Area (px²)</th>
                 <th>Circularity</th>
                 <th>Area Ratio</th>
             </tr>
@@ -68,9 +69,10 @@
                     </div>
                 </td>
                 <td>({{ m.center.x }}, {{ m.center.y }})</td>
-                <td>{{ m.radius }}</td>
+                <td>{{ m.length_px }}</td>
+                <td>{{ m.breadth_px }}</td>
                 <td>{% if m.contour_area > 0 %}{{ "{:,}".format(m.contour_area|round(0, 'floor')|int) }}{% else %}N/A{% endif %}</td>
-                <td>{{ "{:,}".format(m.circle_area|round(0, 'floor')|int) }}</td>
+                <td>{{ "{:,}".format(m.ellipse_area|round(0, 'floor')|int) }}</td>
                 <td>
                     {% if m.circularity > 0 %}
                     <span class="metric-pill {% if m.circularity > 0.85 %}metric-good{% elif m.circularity > 0.6 %}metric-ok{% else %}metric-low{% endif %}">
@@ -99,8 +101,8 @@
     <h2>📐 Geometric Properties Explained</h2>
     <div class="info-cards">
         <div class="info-card">
-            <h4>🔵 Minimum Enclosing Circle</h4>
-            <p>The smallest circle that fully contains the log contour, computed via <code>cv2.minEnclosingCircle()</code>.</p>
+            <h4>🔵 Fitted Ellipse (L×B)</h4>
+            <p>A tight ellipse fitted to the actual wood pixels via <code>cv2.fitEllipse()</code>. The <span style="color:#ff8c00">orange axis</span> is length (major), the <span style="color:#0064ff">blue axis</span> is breadth (minor) — tracing the real wood edge, not the loose detection box.</p>
         </div>
         <div class="info-card">
             <h4>⭕ Circularity (4πA / P²)</h4>

@@ -405,25 +405,36 @@ class LogDetector:
         draw_bbox: bool = True,
     ) -> np.ndarray:
         """
-        Draw bounding boxes, inscribed circles/ellipses, and labels on the image.
+        Draw bounding boxes, tight fitted ellipses, and labels on the image.
+
+        For each detection the ellipse/circle is fitted to the **actual wood
+        contour** (HSV-segmented inside the ROI), not to the loose YOLO
+        bounding box — so the drawn shape traces the real wood edge and shows
+        the exact length × breadth of each log.
 
         For each detection:
           - Bounding box rectangle (optional).
-          - Inscribed circle (if aspect ratio ≈ 1.0) or ellipse (otherwise),
-            fitted to the bounding box — visually highlights the log cross-section.
-          - Center point dot + aspect ratio label.
+          - Fitted ellipse (``cv2.fitEllipse`` on the wood contour) hugging
+            the actual wood edge, with major (length, orange) and minor
+            (breadth, blue) axes drawn through the centre.
+          - Center point dot + class/confidence/length×breadth label.
 
         Args:
             image: Original BGR image.
             detections: Detection list from detect().
-            box_thickness: Line thickness for bounding boxes and circles.
+            box_thickness: Line thickness for bounding boxes and ellipses.
             font_scale: Font scale for labels.
-            draw_circle: If True, draw the inscribed circle/ellipse.
+            draw_circle: If True, draw the fitted ellipse + axes.
             draw_bbox: If True, draw the bounding box rectangle.
 
         Returns:
             Annotated image (new copy; original is not modified).
         """
+        import math
+
+        # Lazy import to avoid a circular import at module load time
+        from app.segmentation import extract_wood_contour
+
         annotated = image.copy()
 
         for det in detections:
@@ -431,8 +442,6 @@ class LogDetector:
             class_id = det["class_id"]
             class_name = det["class_name"]
             confidence = det["confidence"]
-            aspect_ratio = det.get("aspect_ratio", 1.0)
-            diameter = det.get("diameter_px", 0)
             color = get_color_for_class(class_id)
 
             x1, y1 = bbox["x1"], bbox["y1"]
@@ -447,27 +456,73 @@ class LogDetector:
             if draw_bbox:
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
 
-            # Draw inscribed circle / ellipse
+            # Draw fitted ellipse / circle traced on the ACTUAL wood contour
+            length_px = 0.0
+            breadth_px = 0.0
             if draw_circle and w > 0 and h > 0:
-                if 0.85 <= aspect_ratio <= 1.18:
-                    # Nearly square → draw a perfect circle
+                contour_global, _, _ = extract_wood_contour(image, bbox, pad=5)
+                drawn = False
+
+                if contour_global is not None and len(contour_global) >= 5:
+                    try:
+                        ellipse_box = cv2.fitEllipse(contour_global)
+                        cv2.ellipse(annotated, ellipse_box, color, box_thickness)
+                        (ec_x, ec_y), (emaj, emin), ea = ellipse_box
+                        length_px = float(max(emaj, emin))
+                        breadth_px = float(min(emaj, emin))
+                        cx_e = int(ec_x)
+                        cy_e = int(ec_y)
+
+                        # Draw length (major, orange) + breadth (minor, blue)
+                        # axes through the ellipse centre.
+                        angle_rad = math.radians(ea)
+                        dx_l = (length_px / 2.0) * math.cos(angle_rad)
+                        dy_l = (length_px / 2.0) * math.sin(angle_rad)
+                        dx_b = (breadth_px / 2.0) * math.cos(
+                            angle_rad + math.pi / 2
+                        )
+                        dy_b = (breadth_px / 2.0) * math.sin(
+                            angle_rad + math.pi / 2
+                        )
+                        cv2.line(
+                            annotated,
+                            (int(cx_e - dx_l), int(cy_e - dy_l)),
+                            (int(cx_e + dx_l), int(cy_e + dy_l)),
+                            (0, 200, 255),  # orange — length axis
+                            1,
+                            cv2.LINE_AA,
+                        )
+                        cv2.line(
+                            annotated,
+                            (int(cx_e - dx_b), int(cy_e - dy_b)),
+                            (int(cx_e + dx_b), int(cy_e + dy_b)),
+                            (255, 100, 0),  # blue — breadth axis
+                            1,
+                            cv2.LINE_AA,
+                        )
+                        # center dot at the true ellipse centre
+                        cv2.circle(annotated, (cx_e, cy_e), 2, color, -1)
+                        drawn = True
+                    except cv2.error:
+                        drawn = False
+
+                if not drawn:
+                    # Fallback: tight circle using the smaller bbox dimension
+                    # (tighter than the old minEnclosingCircle approach).
                     radius = int(min(w, h) / 2)
                     cv2.circle(annotated, (cx, cy), radius, color, box_thickness)
-                else:
-                    # Elongated → draw an ellipse fitted to the bbox
-                    cv2.ellipse(
-                        annotated,
-                        (cx, cy),
-                        (int(w / 2), int(h / 2)),
-                        0, 0, 360,
-                        color, box_thickness,
-                    )
+                    cv2.circle(annotated, (cx, cy), 2, color, -1)
+                    length_px = float(radius * 2)
+                    breadth_px = float(radius * 2)
 
-                # Center point dot
-                cv2.circle(annotated, (cx, cy), 2, color, -1)
-
-            # Label text: class + confidence + ratio
-            label = f"{class_name} {confidence:.2f} r={aspect_ratio:.2f}"
+            # Label text: class + confidence + length×breadth
+            if length_px > 0:
+                label = (
+                    f"{class_name} {confidence:.2f} "
+                    f"L={int(length_px)}xB={int(breadth_px)}"
+                )
+            else:
+                label = f"{class_name} {confidence:.2f}"
 
             # Label background
             (tw, th), baseline = cv2.getTextSize(

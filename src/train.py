@@ -95,6 +95,34 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "close_mosaic": 15,
         "patience": 50,
     },
+    "recall": {
+        "description": "Recall-focused training — maximize detection of every "
+                       "visible log (small, occluded, edge-partial). Tuned for "
+                       "CPU-only training with label smoothing and box gain boost.",
+        "epochs": 60,
+        "imgsz": 640,
+        "batch": 4,
+        "optimizer": "AdamW",
+        "lr0": 0.001,
+        "lrf": 0.01,
+        "mosaic": 1.0,
+        "mixup": 0.1,
+        "copy_paste": 0.1,
+        "fliplr": 0.5,
+        "scale": 0.5,
+        "hsv_h": 0.015,
+        "hsv_s": 0.7,
+        "hsv_v": 0.5,
+        "degrees": 10.0,
+        "translate": 0.1,
+        "shear": 0.0,
+        "perspective": 0.0,
+        "label_smoothing": 0.05,
+        "box": 8.0,
+        "cls": 0.4,
+        "close_mosaic": 10,
+        "patience": 20,
+    },
 }
 
 

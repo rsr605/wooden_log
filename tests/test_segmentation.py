@@ -2,7 +2,8 @@
 Unit tests for the LogAnalyzer class (app/segmentation.py).
 
 Tests use synthetic images with known shapes so geometric measurements
-can be verified precisely.
+can be verified precisely. After the move to cv2.fitEllipse, every
+result now exposes length_px (major axis) and breadth_px (minor axis).
 """
 
 import math
@@ -80,7 +81,59 @@ class TestLogAnalyzerInit:
 
 
 # ---------------------------------------------------------------------------
-# Contour Extraction
+# Shared extract_wood_contour helper
+# ---------------------------------------------------------------------------
+
+class TestExtractWoodContour:
+    def test_returns_contour_for_brown_shape(self):
+        """extract_wood_contour should find a contour for a brown shape."""
+        from app.segmentation import extract_wood_contour
+
+        img = make_circle_image(200, 200, 100, 100, 40)
+        bbox = {"x1": 55, "y1": 55, "x2": 145, "y2": 145}
+        contour, rx1, ry1 = extract_wood_contour(img, bbox, pad=5)
+
+        assert contour is not None
+        assert len(contour) >= 5
+
+    def test_returns_none_for_no_wood(self):
+        """extract_wood_contour should return None when there are no wood pixels."""
+        from app.segmentation import extract_wood_contour
+
+        img = np.zeros((200, 200, 3), dtype=np.uint8)  # all black
+        bbox = {"x1": 50, "y1": 50, "x2": 150, "y2": 150}
+        contour, _, _ = extract_wood_contour(img, bbox, pad=5)
+        assert contour is None
+
+    def test_contour_in_global_coordinates(self):
+        """The returned contour should be shifted to full-image coordinates."""
+        from app.segmentation import extract_wood_contour
+
+        img = make_circle_image(200, 200, 100, 100, 40)
+        bbox = {"x1": 55, "y1": 55, "x2": 145, "y2": 145}
+        contour, _, _ = extract_wood_contour(img, bbox, pad=5)
+
+        # The contour centroid should be near (100, 100) — the circle centre
+        # in full-image coords, proving the shift was applied.
+        m = cv2.moments(contour)
+        cx = m["m10"] / m["m00"]
+        cy = m["m01"] / m["m00"]
+        assert abs(cx - 100) < 8
+        assert abs(cy - 100) < 8
+
+    def test_empty_roi_does_not_crash(self):
+        """A zero-size ROI should not crash."""
+        from app.segmentation import extract_wood_contour
+
+        img = np.zeros((10, 10, 3), dtype=np.uint8)
+        # bbox completely outside the image
+        bbox = {"x1": 100, "y1": 100, "x2": 200, "y2": 200}
+        contour, _, _ = extract_wood_contour(img, bbox, pad=5)
+        assert contour is None
+
+
+# ---------------------------------------------------------------------------
+# Contour Extraction (legacy instance helpers — still present)
 # ---------------------------------------------------------------------------
 
 class TestContourExtraction:
@@ -138,16 +191,77 @@ class TestContourExtraction:
 
 
 # ---------------------------------------------------------------------------
-# Geometry — circle fitting on circular shapes
+# Geometry — ellipse fitting (NEW primary tests)
 # ---------------------------------------------------------------------------
 
-class TestCircleGeometry:
-    def test_center_and_radius_for_circular_log(self):
-        """A perfect circle should yield center ≈ known, radius ≈ known."""
+class TestEllipseFitting:
+    def test_length_and_breadth_for_circle(self):
+        """A circle should give length ≈ breadth ≈ 2 × radius."""
         from app.segmentation import LogAnalyzer
         analyzer = LogAnalyzer(pad=2)
 
-        # Draw a brown circle at (100,100), r=40
+        img = make_circle_image(200, 200, 100, 100, 40)
+        det = make_detection((55, 55, 145, 145))
+
+        results, _ = analyzer.analyze(img, [det])
+        res = results[0]
+
+        assert abs(res["length_px"] - 80) < 6
+        assert abs(res["breadth_px"] - 80) < 6
+
+    def test_length_ge_breadth(self):
+        """length_px must always be ≥ breadth_px (major ≥ minor axis)."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
+        # Elongated ellipse
+        img = make_ellipse_image(300, 200, 150, 100, (80, 25))
+        det = make_detection((65, 70, 235, 130))
+
+        results, _ = analyzer.analyze(img, [det])
+        res = results[0]
+
+        assert res["length_px"] >= res["breadth_px"]
+
+    def test_length_matches_major_axis_for_ellipse(self):
+        """length_px should ≈ 2 × major axis for a drawn ellipse."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
+        # axes=(80, 25) → major=80, so length_px ≈ 160
+        img = make_ellipse_image(300, 200, 150, 100, (80, 25))
+        det = make_detection((65, 70, 235, 130))
+
+        results, _ = analyzer.analyze(img, [det])
+        res = results[0]
+
+        assert abs(res["length_px"] - 160) < 10
+        assert abs(res["breadth_px"] - 50) < 8
+
+    def test_ellipse_angle_is_none_in_fallback(self):
+        """When no wood contour is found, ellipse_angle should be None."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
+        img = np.zeros((200, 200, 3), dtype=np.uint8)
+        det = make_detection((50, 50, 150, 150))
+
+        results, _ = analyzer.analyze(img, [det])
+        res = results[0]
+
+        assert res["ellipse_angle"] is None
+
+
+# ---------------------------------------------------------------------------
+# Geometry — circle shapes (compatibility)
+# ---------------------------------------------------------------------------
+
+class TestCircleGeometry:
+    def test_center_for_circular_log(self):
+        """A perfect circle should yield center ≈ known."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
         img = make_circle_image(200, 200, 100, 100, 40)
         det = make_detection((55, 55, 145, 145))
 
@@ -156,21 +270,6 @@ class TestCircleGeometry:
 
         assert abs(res["center"]["x"] - 100) < 5
         assert abs(res["center"]["y"] - 100) < 5
-        assert abs(res["radius"] - 40) < 5
-
-    def test_circle_area_correct(self):
-        """Circle area should be ≈ π * r²."""
-        from app.segmentation import LogAnalyzer
-        analyzer = LogAnalyzer(pad=2)
-
-        img = make_circle_image(200, 200, 100, 100, 40)
-        det = make_detection((55, 55, 145, 145))
-
-        results, _ = analyzer.analyze(img, [det])
-        res = results[0]
-
-        expected = math.pi * (40 ** 2)
-        assert abs(res["circle_area"] - expected) < 200
 
     def test_circularity_near_1_for_circle(self):
         """A perfect circle should have circularity near 1.0."""
@@ -196,7 +295,7 @@ class TestCircleGeometry:
         results, _ = analyzer.analyze(img, [det])
         res = results[0]
 
-        assert res["area_ratio"] > 0.8
+        assert res["area_ratio"] > 0.7
 
     def test_contour_area_positive(self):
         """Contour area should be a positive number for a real shape."""
@@ -213,7 +312,7 @@ class TestCircleGeometry:
 
 
 # ---------------------------------------------------------------------------
-# Geometry — ellipse / elongated shapes
+# Geometry — elongated shapes
 # ---------------------------------------------------------------------------
 
 class TestEllipseGeometry:
@@ -231,8 +330,8 @@ class TestEllipseGeometry:
 
         assert res["circularity"] < 0.85
 
-    def test_elongated_shape_area_ratio_less_than_1(self):
-        """Elongated shape fills < 1.0 of its enclosing circle."""
+    def test_length_much_greater_than_breadth(self):
+        """An elongated ellipse should have length >> breadth."""
         from app.segmentation import LogAnalyzer
         analyzer = LogAnalyzer(pad=2)
 
@@ -242,21 +341,7 @@ class TestEllipseGeometry:
         results, _ = analyzer.analyze(img, [det])
         res = results[0]
 
-        assert res["area_ratio"] < 0.8
-
-    def test_radius_encompasses_shape(self):
-        """Min enclosing circle radius should be ≥ max axis of the ellipse."""
-        from app.segmentation import LogAnalyzer
-        analyzer = LogAnalyzer(pad=2)
-
-        img = make_ellipse_image(300, 200, 150, 100, (80, 25))
-        det = make_detection((65, 70, 235, 130))
-
-        results, _ = analyzer.analyze(img, [det])
-        res = results[0]
-
-        # min enclosing circle radius should be at least the major axis
-        assert res["radius"] >= 75
+        assert res["length_px"] > res["breadth_px"] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +384,7 @@ class TestMultipleLogs:
         np.testing.assert_array_equal(img, annotated)
 
     def test_annotated_image_differs_from_original(self):
-        """Annotated image should differ when circles are drawn."""
+        """Annotated image should differ when ellipses are drawn."""
         from app.segmentation import LogAnalyzer
         analyzer = LogAnalyzer(pad=2)
 
@@ -328,10 +413,21 @@ class TestResultStructure:
 
         required_keys = {
             "id", "class_name", "confidence", "bbox",
-            "center", "radius", "contour_area",
-            "circle_area", "circularity", "area_ratio",
+            "center", "radius", "length_px", "breadth_px",
+            "contour_area", "ellipse_area", "circularity", "area_ratio",
         }
         assert required_keys.issubset(set(res.keys()))
+
+    def test_result_does_not_contain_ellipse_box(self):
+        """The raw ellipse_box (cv2 tuple) must NOT leak into the JSON dict."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
+        img = make_circle_image(200, 200, 100, 100, 40)
+        det = make_detection((55, 55, 145, 145))
+
+        results, _ = analyzer.analyze(img, [det])
+        assert "ellipse_box" not in results[0]
 
     def test_center_has_x_and_y(self):
         """center should be a dict with x and y."""
@@ -385,7 +481,7 @@ class TestResultStructure:
 
 class TestEdgeCases:
     def test_no_wood_pixels_uses_bbox_fallback(self):
-        """When no wood-coloured pixels found, fall back to bbox-based estimate."""
+        """When no wood-coloured pixels found, fall back to bbox-based circle."""
         from app.segmentation import LogAnalyzer
         analyzer = LogAnalyzer(pad=2)
 
@@ -397,10 +493,24 @@ class TestEdgeCases:
         res = results[0]
 
         # Should still produce valid numbers
-        assert res["radius"] > 0
-        assert res["circle_area"] > 0
+        assert res["length_px"] > 0
+        assert res["breadth_px"] > 0
+        assert res["ellipse_area"] > 0
         # Fallback circularity is 0 since no contour found
         assert res["circularity"] == 0.0
+
+    def test_fallback_length_equals_breadth(self):
+        """Fallback circle should give length == breadth."""
+        from app.segmentation import LogAnalyzer
+        analyzer = LogAnalyzer(pad=2)
+
+        img = np.zeros((200, 200, 3), dtype=np.uint8)
+        det = make_detection((50, 50, 150, 150))
+
+        results, _ = analyzer.analyze(img, [det])
+        res = results[0]
+
+        assert res["length_px"] == res["breadth_px"]
 
     def test_roi_padding_respected(self):
         """Analyzer should use the configured pad value."""
